@@ -1,39 +1,61 @@
-const { sql, pool } = require("../config/database");
-const crypto = require("crypto");
+﻿const crypto = require("crypto");
+const { sql, getPool } = require("../config/database");
+const jwt = require("jsonwebtoken");
+const { sendMail, isEmailConfigured } = require("../services/email.service");
 
-// ✅ LOGIN
 exports.login = async (req, res) => {
   try {
-    const { Email, Contrasena } = req.body;
+    const Email = req.body?.Email ?? req.body?.email;
+    const Contrasena =
+      req.body?.Contrasena ?? req.body?.contrasena ?? req.body?.password;
 
     if (!Email || !Contrasena) {
-      return res.status(400).json({ error: "Email y contraseña requeridos" });
+      return res.status(400).json({ error: "Email y contrasena requeridos" });
     }
 
-    const poolConn = await pool; // ✅ pool es una promesa
-
-    const result = await poolConn
+    const pool = await getPool();
+    const result = await pool
       .request()
-      .input("Email", sql.VarChar, Email)
+      .input("Email", sql.VarChar, String(Email).trim())
       .input("Contrasena", sql.VarChar, Contrasena)
       .query(`
-        SELECT UsuarioID, Nombre, Apellido, Email
+        SELECT UsuarioID, Nombre, Apellido, Email, Telefono, EstadoUsuarioID
         FROM dbo.Usuarios
         WHERE Email = @Email AND Contrasena = @Contrasena
       `);
 
     if (result.recordset.length === 0) {
-      return res.status(401).json({ error: "Usuario o contraseña incorrectos" });
+      return res.status(401).json({ error: "Usuario o contrasena incorrectos" });
     }
 
-    res.json({ message: "Login correcto", usuario: result.recordset[0] });
+    const usuario = result.recordset[0];
+
+    const token = jwt.sign(
+      {
+        sub: usuario.UsuarioID,
+        email: usuario.Email,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+    res.json({
+      message: "Login correcto",
+      token,
+      usuario: {
+        id: usuario.UsuarioID,
+        nombre: usuario.Nombre,
+        apellido: usuario.Apellido,
+        email: usuario.Email,
+        telefono: usuario.Telefono,
+        estadoUsuarioId: usuario.EstadoUsuarioID,
+      },
+    });
   } catch (error) {
     console.error("ERROR LOGIN:", error);
     res.status(500).json({ error: "Error interno" });
   }
 };
 
-// ✅ REGISTER
 exports.register = async (req, res) => {
   try {
     const { Nombre, Apellido, Email, Telefono, Contrasena } = req.body;
@@ -42,23 +64,23 @@ exports.register = async (req, res) => {
       return res.status(400).json({ error: "Faltan datos" });
     }
 
-    const poolConn = await pool;
+    const pool = await getPool();
 
-    const existe = await poolConn
+    const existe = await pool
       .request()
-      .input("Email", sql.VarChar, Email)
+      .input("Email", sql.VarChar, String(Email).trim())
       .query("SELECT UsuarioID FROM dbo.Usuarios WHERE Email = @Email");
 
     if (existe.recordset.length > 0) {
       return res.status(400).json({ error: "Correo ya registrado" });
     }
 
-    await poolConn
+    await pool
       .request()
-      .input("Nombre", sql.VarChar, Nombre)
-      .input("Apellido", sql.VarChar, Apellido)
-      .input("Email", sql.VarChar, Email)
-      .input("Telefono", sql.VarChar, Telefono)
+      .input("Nombre", sql.VarChar, String(Nombre).trim())
+      .input("Apellido", sql.VarChar, String(Apellido).trim())
+      .input("Email", sql.VarChar, String(Email).trim())
+      .input("Telefono", sql.VarChar, String(Telefono).trim())
       .input("Contrasena", sql.VarChar, Contrasena)
       .query(`
         INSERT INTO dbo.Usuarios
@@ -74,31 +96,31 @@ exports.register = async (req, res) => {
   }
 };
 
-// ✅ FORGOT PASSWORD (DEV: imprime link en consola)
 exports.forgotPassword = async (req, res) => {
   try {
     const { Email } = req.body;
-    if (!Email) return res.status(400).json({ error: "Email requerido" });
 
-    const poolConn = await pool;
+    if (!Email) {
+      return res.status(400).json({ error: "Email requerido" });
+    }
 
-    const user = await poolConn
+    const pool = await getPool();
+    const user = await pool
       .request()
-      .input("Email", sql.VarChar, Email)
-      .query(`SELECT UsuarioID, Email FROM dbo.Usuarios WHERE Email = @Email`);
+      .input("Email", sql.VarChar, String(Email).trim())
+      .query("SELECT UsuarioID, Email FROM dbo.Usuarios WHERE Email = @Email");
 
-    // Por seguridad, no decimos si existe o no
+    // Always respond OK to avoid leaking registered emails
     if (user.recordset.length === 0) {
       return res.json({ message: "Si el correo existe, te enviaremos un enlace." });
     }
 
     const usuarioID = user.recordset[0].UsuarioID;
-
+    const email = user.recordset[0].Email;
     const token = crypto.randomBytes(32).toString("hex");
     const expiraMin = 15;
 
-    // ⚠️ Esto requiere la tabla dbo.PasswordResetTokens (te digo abajo cómo crearla)
-    await poolConn
+    await pool
       .request()
       .input("UsuarioID", sql.Int, usuarioID)
       .input("Token", sql.VarChar, token)
@@ -108,8 +130,22 @@ exports.forgotPassword = async (req, res) => {
         VALUES (@UsuarioID, @Token, @ExpiraEn, 0)
       `);
 
-    const link = `http://localhost:5173/reset-password?token=${token}`;
-    console.log("🔗 LINK RESET (DEV):", link);
+    const frontendBase = process.env.FRONTEND_URL || "http://localhost:5173";
+    const link = `${frontendBase}/reset-password?token=${token}`;
+
+    const subject = "Recuperación de contraseña";
+    const text = `Usa este enlace para restablecer tu contraseña (expira en ${expiraMin} minutos): ${link}`;
+    const html = `
+      <p>Hola,</p>
+      <p>Usa este enlace para restablecer tu contraseña (expira en ${expiraMin} minutos):</p>
+      <p><a href="${link}">${link}</a></p>
+    `;
+
+    const mailResult = await sendMail({ to: email, subject, text, html });
+    if (mailResult.skipped) {
+      console.log("LINK RESET (DEV):", link);
+      console.log("(SMTP no configurado: setea SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/MAIL_FROM)");
+    }
 
     return res.json({ message: "Si el correo existe, te enviaremos un enlace." });
   } catch (error) {
@@ -118,17 +154,16 @@ exports.forgotPassword = async (req, res) => {
   }
 };
 
-// ✅ RESET PASSWORD
 exports.resetPassword = async (req, res) => {
   try {
     const { token, Contrasena } = req.body;
+
     if (!token || !Contrasena) {
-      return res.status(400).json({ error: "Token y contraseña requeridos" });
+      return res.status(400).json({ error: "Token y contrasena requeridos" });
     }
 
-    const poolConn = await pool;
-
-    const tokenRow = await poolConn
+    const pool = await getPool();
+    const tokenRow = await pool
       .request()
       .input("Token", sql.VarChar, token)
       .query(`
@@ -139,17 +174,22 @@ exports.resetPassword = async (req, res) => {
       `);
 
     if (tokenRow.recordset.length === 0) {
-      return res.status(400).json({ error: "Token inválido" });
+      return res.status(400).json({ error: "Token invalido" });
     }
 
-    const t = tokenRow.recordset[0];
+    const savedToken = tokenRow.recordset[0];
 
-    if (t.Usado) return res.status(400).json({ error: "Token ya fue usado" });
-    if (new Date(t.ExpiraEn) < new Date()) return res.status(400).json({ error: "Token expirado" });
+    if (savedToken.Usado) {
+      return res.status(400).json({ error: "Token ya fue usado" });
+    }
 
-    await poolConn
+    if (new Date(savedToken.ExpiraEn) < new Date()) {
+      return res.status(400).json({ error: "Token expirado" });
+    }
+
+    await pool
       .request()
-      .input("UsuarioID", sql.Int, t.UsuarioID)
+      .input("UsuarioID", sql.Int, savedToken.UsuarioID)
       .input("Contrasena", sql.VarChar, Contrasena)
       .query(`
         UPDATE dbo.Usuarios
@@ -157,12 +197,12 @@ exports.resetPassword = async (req, res) => {
         WHERE UsuarioID = @UsuarioID
       `);
 
-    await poolConn
+    await pool
       .request()
-      .input("TokenID", sql.Int, t.TokenID)
-      .query(`UPDATE dbo.PasswordResetTokens SET Usado = 1 WHERE TokenID = @TokenID`);
+      .input("TokenID", sql.Int, savedToken.TokenID)
+      .query("UPDATE dbo.PasswordResetTokens SET Usado = 1 WHERE TokenID = @TokenID");
 
-    res.json({ message: "Contraseña actualizada correctamente" });
+    res.json({ message: "Contrasena actualizada correctamente" });
   } catch (error) {
     console.error("ERROR RESET:", error);
     res.status(500).json({ error: "Error interno" });

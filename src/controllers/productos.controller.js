@@ -1,4 +1,4 @@
-const { sql, pool } = require('../config/database');
+﻿const { sql, getPool } = require("../config/database");
 
 exports.crearProducto = async (req, res) => {
   try {
@@ -8,17 +8,18 @@ exports.crearProducto = async (req, res) => {
       precio,
       stock,
       marcaID,
-      tipoPielID
+      tipoPielID,
     } = req.body;
 
-    const request = (await pool).request();
-    await request
-      .input('NombreProducto', sql.VarChar, nombreProducto)
-      .input('Descripcion', sql.Text, descripcion)
-      .input('Precio', sql.Decimal(10,2), precio)
-      .input('Stock', sql.Int, stock)
-      .input('MarcaID', sql.Int, marcaID)
-      .input('TipoPielID', sql.Int, tipoPielID)
+    const pool = await getPool();
+    await pool
+      .request()
+      .input("NombreProducto", sql.VarChar, nombreProducto)
+      .input("Descripcion", sql.Text, descripcion)
+      .input("Precio", sql.Decimal(10, 2), precio)
+      .input("Stock", sql.Int, stock)
+      .input("MarcaID", sql.Int, marcaID)
+      .input("TipoPielID", sql.Int, tipoPielID)
       .query(`
         INSERT INTO Productos
         (NombreProducto, Descripcion, Precio, Stock, MarcaID, TipoPielID)
@@ -26,9 +27,9 @@ exports.crearProducto = async (req, res) => {
         (@NombreProducto, @Descripcion, @Precio, @Stock, @MarcaID, @TipoPielID)
       `);
 
-    res.status(201).json({ message: 'Producto creado correctamente' });
+    res.status(201).json({ message: "Producto creado correctamente" });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error creando producto' });
+    res.status(500).json({ error: "Error creando producto" });
   }
 };
